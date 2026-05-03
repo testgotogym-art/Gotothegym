@@ -7786,6 +7786,188 @@ window._adminDirectBackup = function(){
   })
   .catch(function(e){ clearTimeout(timer); console.log("Fetch error:", e); });
 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SUPABASE SYNC — แทนที่ GAS ทั้งหมด
+// ══════════════════════════════════════════════════════════════════════════════
+var SB_URL = "https://pbgwezajvbbqrgzkrvfz.supabase.co";
+var SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBiZ3dlemFqdmJicXJnemtydmZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3NTI4NjIsImV4cCI6MjA5MzMyODg2Mn0.8dPb1fNMGk24RoocvLIMHl8JkXYE2NZG68B5cKqayYA";
+
+function _sbFetch(path, method, body) {
+  return fetch(SB_URL + "/rest/v1/" + path, {
+    method: method || "GET",
+    headers: {
+      "apikey": SB_KEY,
+      "Authorization": "Bearer " + SB_KEY,
+      "Content-Type": "application/json",
+      "Prefer": method === "POST" ? "resolution=merge-duplicates,return=representation" : "return=representation"
+    },
+    body: body ? JSON.stringify(body) : undefined
+  }).then(function(r) { return r.json(); });
+}
+
+// Push user data ──────────────────────────────────────────────────────────────
+function _sbPush(onDone) {
+  var ses = _sesLoad();
+  if (!ses || ses.isMaster) { if(onDone) onDone(); return; }
+  var payload = _cloudPayload();
+  if (!payload) return;
+  _setCloudStatus("syncing");
+  _sbFetch("user_data", "POST", {
+    username: ses.username,
+    timestamp: new Date().toISOString(),
+    version: 5,
+    clients: payload.clients || [],
+    food: payload.food || [],
+    custom_foods: payload.customFoods || [],
+    bulletins: payload.bulletins || [],
+    settings: payload.settings || {}
+  })
+  .then(function() { _setCloudStatus("ok"); if(onDone) onDone(); })
+  .catch(function() { _setCloudStatus("err"); });
+}
+
+// Pull user data ──────────────────────────────────────────────────────────────
+function _sbPull(onDone) {
+  var ses = _sesLoad();
+  if (!ses || ses.isMaster) { if(onDone) onDone(null); return; }
+  _setCloudStatus("syncing");
+  _sbFetch("user_data?username=eq." + encodeURIComponent(ses.username) + "&limit=1")
+  .then(function(rows) {
+    if (!rows || !rows.length) { _setCloudStatus("ok"); if(onDone) onDone(null); return; }
+    var rec = rows[0];
+    if (rec.clients) S.clients = rec.clients;
+    if (rec.food) S.food = rec.food;
+    if (rec.custom_foods) { customFoods = rec.custom_foods; saveCustomFoods(); }
+    if (rec.bulletins) {
+      var local = _bulletinLoad();
+      var seenMap = {};
+      local.forEach(function(p) { if(p.seen) seenMap[p.id] = true; });
+      var merged = rec.bulletins.map(function(p) { return Object.assign({}, p, {seen: seenMap[p.id] || p.seen}); });
+      _bulletinSave(merged);
+    }
+    if (rec.settings) {
+      var st = rec.settings;
+      if (st.managerName && !localStorage.getItem("managerName")) {
+        localStorage.setItem("managerName", st.managerName); _managerName = st.managerName;
+      }
+    }
+    save(); _setCloudStatus("ok");
+    if(onDone) onDone(rec);
+  })
+  .catch(function() { _setCloudStatus("err"); if(onDone) onDone(null); });
+}
+
+// Admin sync ──────────────────────────────────────────────────────────────────
+function _sbAdminSync(onDone) {
+  var ses = _sesLoad();
+  if (!ses || !ses.isMaster) return;
+  _setCloudStatus("syncing");
+  Promise.all([
+    _sbFetch("users?limit=500"),
+    _sbFetch("keys?limit=500"),
+    _sbFetch("bulletins?limit=100")
+  ]).then(function(results) {
+    var users = results[0] || [];
+    var keys = results[1] || [];
+    var bulletins = results[2] || [];
+    if (users.length) {
+      var local = _usrLoad();
+      users.forEach(function(gu) {
+        var u = { username: gu.username, displayName: gu.display_name, pwdHash: gu.pwd_hash,
+          password: gu.password, pkg: gu.pkg, expDate: gu.exp_date, currentKey: gu.current_key,
+          note: gu.note, status: gu.status, created: gu.created };
+        var idx = local.findIndex(function(l) { return l.username === u.username; });
+        if (idx >= 0) local[idx] = Object.assign(local[idx], u);
+        else local.push(u);
+      });
+      _usrSave(local);
+    }
+    if (keys.length) {
+      var lk = _keysLoad();
+      keys.forEach(function(gk) {
+        var k = { key: gk.key, pkg: gk.pkg, days: gk.days, note: gk.note,
+          created: gk.created, expDate: gk.exp_date, status: gk.status,
+          usedBy: gk.used_by, usedAt: gk.used_at };
+        var idx = lk.findIndex(function(l) { return l.key === k.key; });
+        if (idx >= 0) lk[idx] = Object.assign(lk[idx], k);
+        else lk.push(k);
+      });
+      _keysSave(lk);
+    }
+    _setCloudStatus("ok");
+    if(onDone) onDone(true);
+  }).catch(function() { _setCloudStatus("err"); if(onDone) onDone(false); });
+}
+
+// Admin backup all localStorage ───────────────────────────────────────────────
+function _sbAdminBackup() {
+  var ses = _sesLoad();
+  if (!ses || !ses.isMaster) return;
+  var users = _usrLoad();
+  var keys = _keysLoad();
+  _setCloudStatus("syncing");
+  // Upsert users
+  if (users.length) {
+    var uRows = users.map(function(u) { return {
+      username: (u.username||"").toLowerCase().trim(),
+      display_name: u.displayName || u.username || "",
+      pwd_hash: u.pwdHash || "", password: u.password || "",
+      pkg: u.pkg || "", exp_date: u.expDate || "",
+      current_key: u.currentKey || "", note: u.note || "",
+      status: u.status || "active", created: u.created || ""
+    }; });
+    _sbFetch("users", "POST", uRows).catch(function(){});
+  }
+  // Upsert keys
+  if (keys.length) {
+    var kRows = keys.map(function(k) { return {
+      key: (k.key||"").toUpperCase(),
+      pkg: k.pkg || "", days: k.days || 30, note: k.note || "",
+      created: k.created || "", exp_date: k.expDate || "",
+      status: k.status || "active", used_by: k.usedBy || "", used_at: k.usedAt || ""
+    }; });
+    _sbFetch("keys", "POST", kRows).catch(function(){});
+  }
+  setTimeout(function() { _setCloudStatus("ok"); _showSyncToast("☁️ Admin Backup สำเร็จ", "rgba(22,163,74,.95)"); }, 2000);
+}
+window._sbAdminBackup = _sbAdminBackup;
+window._sbAdminSync = _sbAdminSync;
+window._sbPush = _sbPush;
+window._sbPull = _sbPull;
+
+// Override sync functions ─────────────────────────────────────────────────────
+_cloudPush = _sbPush;
+_cloudPull = _sbPull;
+gasAdminSync = _sbAdminSync;
+
+// Auto sync ───────────────────────────────────────────────────────────────────
+var _sbSyncInterval = null;
+function _sbAutoSync() {
+  var ses = _sesLoad();
+  if (!ses) return;
+  if (ses.isMaster) {
+    _sbAdminBackup();
+    _sbAdminSync(function(){});
+    if (_sbSyncInterval) clearInterval(_sbSyncInterval);
+    _sbSyncInterval = setInterval(function() { _sbAdminSync(function(){}); }, 40000);
+  } else {
+    _sbPull(function(data) { if(data) { try{rC();}catch(e){} } });
+    if (_sbSyncInterval) clearInterval(_sbSyncInterval);
+    _sbSyncInterval = setInterval(_sbPush, 40000);
+  }
+}
+
+// Start sync after page loads
+setTimeout(_sbAutoSync, 2000);
+
+// Push on close
+window.addEventListener("beforeunload", function() {
+  var ses = _sesLoad();
+  if (ses && !ses.isMaster) { try{ _sbPush(); }catch(e){} }
+});
+
+console.log("✅ Supabase Sync loaded!");
 </script>
 </body>
 </html>
