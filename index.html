@@ -7791,6 +7791,14 @@ window._adminDirectBackup = function(){
 //  SUPABASE SYNC — แทนที่ GAS ทั้งหมด
 // ══════════════════════════════════════════════════════════════════════════════
 var SB_URL = "https://pbgwezajvbbqrgzkrvfz.supabase.co";
+    // ทดสอบ Supabase
+fetch(SB_URL + "/rest/v1/keys?limit=1", {
+  headers: { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY }
+}).then(function(r){ 
+  alert("Supabase status: " + r.status + (r.ok ? " ✅ OK" : " ❌ ERROR"));
+}).catch(function(e){ 
+  alert("❌ เชื่อมต่อไม่ได้: " + e.message); 
+});
 var SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBiZ3dlemFqdmJicXJnemtydmZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3NTI4NjIsImV4cCI6MjA5MzMyODg2Mn0.8dPb1fNMGk24RoocvLIMHl8JkXYE2NZG68B5cKqayYA";
 
 function _sbFetch(path, method, body) {
